@@ -5,9 +5,13 @@ account access, so the key itself does not stop this job from sending e-mail. Th
 therefore carried by the CODE, and this file is that limit.
 
 Raivis, 2026-09-02: "the limit being carried by the code must not mean a comment." So the
-client exposes EXACTLY three operations - export contacts, add to a list, remove from a list -
-and the surface is asserted at import time. There is no send method to find. Anyone who wants
-this job to send mail has to write that capability deliberately; they cannot inherit it.
+client exposes a FIXED set of operations and the surface is asserted at import time. There is
+no send method to find. Anyone who wants this job to send mail has to write that capability
+deliberately; they cannot inherit it.
+
+The set grew from three to four on 2026-09-03 (list_templates, read-only) and that is the point
+of the wrapper: the addition could not be made quietly, so it was asked for and granted. A
+fourth operation is a decision. A fifth one is too.
 
 A genuinely scoped credential does exist via Brevo OAuth (contacts:read / contacts:write are
 separate scopes from transactional.email:write). It was NOT chosen because a refreshing token
@@ -25,11 +29,11 @@ import requests
 log = logging.getLogger("brevo")
 
 BASE = "https://api.brevo.com/v3"
-ALLOWED_OPERATIONS = ("export_contacts_ndjson", "list_add", "list_remove")
+ALLOWED_OPERATIONS = ("export_contacts_ndjson", "list_add", "list_remove", "list_templates")
 
 
 class BrevoContactsClient:
-    """Contacts only. Three operations. No sending."""
+    """Contacts and template metadata. Four operations. No sending."""
 
     def __init__(self, api_key: str):
         if not api_key:
@@ -89,6 +93,35 @@ class BrevoContactsClient:
     def list_remove(self, list_id: int, emails: list) -> int:
         return self._list_op(list_id, "remove", emails)
 
+    # -- 4 -------------------------------------------------------------------
+    def list_templates(self) -> list:
+        """Template metadata only: id, name, subject, isActive. Read-only.
+
+        Brevo will not send an INACTIVE template. Knowing that here, before a track is
+        flipped, is the whole reason this operation exists. It returns no recipients and
+        sends nothing; /smtp/templates is a GET.
+        """
+        out = []
+        offset, limit = 0, 200
+        while True:
+            r = self._call("GET", "/smtp/templates",
+                           params={"limit": limit, "offset": offset, "sort": "asc"})
+            if r.status_code != 200:
+                raise RuntimeError(f"template list failed {r.status_code}: {r.text[:300]}")
+            ts = r.json().get("templates", [])
+            if not ts:
+                break
+            for t in ts:
+                out.append({"template_id": int(t.get("id")),
+                            "name": t.get("name"),
+                            "subject": t.get("subject"),
+                            "is_active": bool(t.get("isActive"))})
+            if len(ts) < limit:
+                break
+            offset += limit
+        log.info("TEMPLATES_READ n=%s active=%s", len(out), sum(1 for t in out if t["is_active"]))
+        return out
+
     def _list_op(self, list_id: int, op: str, emails: list) -> int:
         done = 0
         for i in range(0, len(emails), 150):          # Brevo caps this endpoint at 150
@@ -103,7 +136,7 @@ class BrevoContactsClient:
 
 
 def _assert_surface():
-    """The limit is a shape, not a promise. If someone adds a fourth operation, this fails."""
+    """The limit is a shape, not a promise. If someone adds a fifth operation, this fails."""
     public = {n for n in dir(BrevoContactsClient)
               if not n.startswith("_") and callable(getattr(BrevoContactsClient, n))}
     if public != set(ALLOWED_OPERATIONS):

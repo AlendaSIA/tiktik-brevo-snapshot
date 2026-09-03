@@ -8,9 +8,10 @@ the credential so the sender does not have to.
 What it does, and nothing else:
   1. exports Brevo contacts -> business_marts.brevo_contacts_snapshot (straight into BigQuery)
   2. refreshes Brevo template isActive -> mkt_control.brevo_template_status
-  3. syncs email_suppression_all -> Brevo list 4 (tiktik_suppression), ADD-ONLY
-  4. writes the weekly akcija residual -> Brevo list 65 (tiktik_akcija_atlikums)
-  5. filters every list it writes against email_suppression_all BEFORE writing
+  3. records, per track, whether its letter could actually go out
+  4. syncs email_suppression_all -> Brevo list 4 (tiktik_suppression), ADD-ONLY
+  5. writes the weekly akcija residual -> Brevo list 65 (tiktik_akcija_atlikums)
+  6. filters every list it writes against email_suppression_all BEFORE writing
 
 What it cannot do: send. See brevo_client.py - the client exposes four operations and the
 surface is asserted at import time.
@@ -35,10 +36,7 @@ log = logging.getLogger("snapshot")
 RUN_ID = os.environ.get("CLOUD_RUN_EXECUTION") or f"local-{uuid.uuid4().hex[:12]}"
 EXIT_DELIBERATE_STOP = 3
 
-# A track is ready only when permission, fitness and deliverability all agree. Everything else
-# is a named problem, never a silent zero.
 READY = "READY"
-NOT_A_PROBLEM = ("READY", "TRACK_OFF")
 
 
 class Hold(RuntimeError):
@@ -77,24 +75,31 @@ def step2_template_status(brevo, report):
 
 
 def step3_readiness(report):
-    """Per-track verdict, computed by the view both this report and the sender read."""
+    """Per track: would this letter actually go out if the track were flipped?
+
+    The report deliberately uses verdict_if_enabled and NOT verdict. Every track is off, so
+    verdict answers TRACK_OFF for all of them - true, and useless. The pre-launch question has
+    to be answerable BEFORE the risky action, not after it.
+    """
     rows = bq.track_readiness()
-    problems = [r for r in rows if r["verdict"] not in NOT_A_PROBLEM]
-    report["tracks_ready"] = sum(1 for r in rows if r["verdict"] == READY)
+    problems = [r for r in rows if r["verdict_if_enabled"] != READY]
+    report["tracks_ready"] = sum(1 for r in rows if r["verdict_if_enabled"] == READY)
     report["tracks_not_ready"] = len(problems)
     # A list of problems, not a count. A count sends someone hunting.
     report["tracks_not_ready_json"] = json.dumps(
         [{"track": r["track"], "email_type": r["email_type"], "people": int(r["people"]),
-          "template_id": r["template_id"], "verdict": r["verdict"]} for r in problems],
+          "template_id": r["template_id"], "enabled": bool(r["track_enabled"]),
+          "verdict": r["verdict_if_enabled"]} for r in problems],
         ensure_ascii=False)
     for r in rows:
         log.info("READINESS track=%s email_type=%s people=%s enabled=%s template=%s "
-                 "brevo_active=%s verdict=%s", r["track"], r["email_type"], r["people"],
-                 r["track_enabled"], r["template_id"], r["brevo_active"], r["verdict"])
-    enabled_problems = [r for r in problems if r["track_enabled"]]
-    if enabled_problems:
-        log.error("ENABLED_TRACK_NOT_READY n=%s - %s", len(enabled_problems),
-                  ", ".join(f"{r['track']}:{r['verdict']}" for r in enabled_problems))
+                 "brevo_active=%s if_enabled=%s now=%s", r["track"], r["email_type"], r["people"],
+                 r["track_enabled"], r["template_id"], r["brevo_active"],
+                 r["verdict_if_enabled"], r["verdict"])
+    live = [r for r in rows if r["track_enabled"] and r["verdict"] != READY]
+    if live:
+        log.error("ENABLED_TRACK_NOT_READY n=%s - %s", len(live),
+                  ", ".join(f"{r['track']}:{r['verdict']}" for r in live))
 
 
 def step4_suppression_list(brevo, report):

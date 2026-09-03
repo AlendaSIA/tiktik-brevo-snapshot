@@ -37,7 +37,12 @@ T_SNAPSHOT    = f"{PROJECT}.{MARTS}.brevo_contacts_snapshot"
 T_SUPPRESSION = f"`{PROJECT}.{MARTS}.email_suppression_all`"
 T_REPORT      = f"{PROJECT}.{CONTROL}.snapshot_run_report"
 
+# Brevo template isActive, refreshed here because this job holds the key and the sender does
+# not. The sender reads the TABLE, never Brevo. 2026-09-03.
+T_TEMPLATE_STATUS = f"{PROJECT}.{CONTROL}.brevo_template_status"
+
 # The audience definitions live in BigQuery views, NOT in this repo. One definition, shared with
 # the pre-launch report - copying the SQL here would be a second place for one fact.
 V_RESIDUAL    = f"`{PROJECT}.{CONTROL}.akcija_residual`"
 V_IMPACT      = f"`{PROJECT}.{CONTROL}.akcija_audience_impact`"
+V_READINESS   = f"`{PROJECT}.{CONTROL}.track_send_readiness`"

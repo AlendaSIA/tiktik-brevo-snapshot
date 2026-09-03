@@ -7,11 +7,12 @@ the credential so the sender does not have to.
 
 What it does, and nothing else:
   1. exports Brevo contacts -> business_marts.brevo_contacts_snapshot (straight into BigQuery)
-  2. syncs email_suppression_all -> Brevo list 4 (tiktik_suppression), ADD-ONLY
-  3. writes the weekly akcija residual -> Brevo list 65 (tiktik_akcija_atlikums)
-  4. filters every list it writes against email_suppression_all BEFORE writing
+  2. refreshes Brevo template isActive -> mkt_control.brevo_template_status
+  3. syncs email_suppression_all -> Brevo list 4 (tiktik_suppression), ADD-ONLY
+  4. writes the weekly akcija residual -> Brevo list 65 (tiktik_akcija_atlikums)
+  5. filters every list it writes against email_suppression_all BEFORE writing
 
-What it cannot do: send. See brevo_client.py - the client exposes three operations and the
+What it cannot do: send. See brevo_client.py - the client exposes four operations and the
 surface is asserted at import time.
 
 Exit codes: 0 = ran and reported. 1 = crash. 3 = deliberate stop (a guard refused). A hold must
@@ -34,6 +35,11 @@ log = logging.getLogger("snapshot")
 RUN_ID = os.environ.get("CLOUD_RUN_EXECUTION") or f"local-{uuid.uuid4().hex[:12]}"
 EXIT_DELIBERATE_STOP = 3
 
+# A track is ready only when permission, fitness and deliverability all agree. Everything else
+# is a named problem, never a silent zero.
+READY = "READY"
+NOT_A_PROBLEM = ("READY", "TRACK_OFF")
+
 
 class Hold(RuntimeError):
     """A deliberate refusal. Distinct from a crash, on purpose."""
@@ -54,7 +60,44 @@ def step1_snapshot(brevo):
     return n
 
 
-def step2_suppression_list(brevo, report):
+def step2_template_status(brevo, report):
+    """Brevo template isActive -> BigQuery, so the sender can see it without a credential.
+
+    Brevo refuses to send an INACTIVE template. Before 2026-09-03 that would have surfaced
+    mid-send, after a track was already flipped. Now it is a row the pre-launch report and the
+    sender both read.
+    """
+    rows = brevo.list_templates()
+    checked = _now().isoformat()
+    for r in rows:
+        r["checked_at"] = checked
+    report["templates_read"] = bq.load_template_status(rows)
+    log.info("TEMPLATE_STATUS_REFRESHED n=%s active=%s",
+             len(rows), sum(1 for r in rows if r["is_active"]))
+
+
+def step3_readiness(report):
+    """Per-track verdict, computed by the view both this report and the sender read."""
+    rows = bq.track_readiness()
+    problems = [r for r in rows if r["verdict"] not in NOT_A_PROBLEM]
+    report["tracks_ready"] = sum(1 for r in rows if r["verdict"] == READY)
+    report["tracks_not_ready"] = len(problems)
+    # A list of problems, not a count. A count sends someone hunting.
+    report["tracks_not_ready_json"] = json.dumps(
+        [{"track": r["track"], "email_type": r["email_type"], "people": int(r["people"]),
+          "template_id": r["template_id"], "verdict": r["verdict"]} for r in problems],
+        ensure_ascii=False)
+    for r in rows:
+        log.info("READINESS track=%s email_type=%s people=%s enabled=%s template=%s "
+                 "brevo_active=%s verdict=%s", r["track"], r["email_type"], r["people"],
+                 r["track_enabled"], r["template_id"], r["brevo_active"], r["verdict"])
+    enabled_problems = [r for r in problems if r["track_enabled"]]
+    if enabled_problems:
+        log.error("ENABLED_TRACK_NOT_READY n=%s - %s", len(enabled_problems),
+                  ", ".join(f"{r['track']}:{r['verdict']}" for r in enabled_problems))
+
+
+def step4_suppression_list(brevo, report):
     """email_suppression_all -> list 4. Add-only, by design."""
     target = bq.suppressed_present_in_brevo()
     current = bq.list_members(C.SUPPRESSION_LIST_ID)
@@ -78,7 +121,7 @@ def step2_suppression_list(brevo, report):
         report["suppression_added"] = brevo.list_add(C.SUPPRESSION_LIST_ID, to_add)
 
 
-def step3_akcija_residual(brevo, report):
+def step5_akcija_residual(brevo, report):
     """The weekly residual -> list 65, filtered against suppression BEFORE the write."""
     target = bq.akcija_residual()
     # Guard at the door (Raivis, 2026-09-02): every list this job writes is filtered against
@@ -126,8 +169,10 @@ def main():
     try:
         brevo = BrevoContactsClient(C.BREVO_API_KEY)
         report["contacts"] = step1_snapshot(brevo)
-        step2_suppression_list(brevo, report)
-        step3_akcija_residual(brevo, report)
+        step2_template_status(brevo, report)
+        step3_readiness(report)
+        step4_suppression_list(brevo, report)
+        step5_akcija_residual(brevo, report)
         report.update(status="ok", finished_at=_now().isoformat())
         bq.write_report(report)
         log.info("RUN_OK %s", report)

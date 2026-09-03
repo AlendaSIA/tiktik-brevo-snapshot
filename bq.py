@@ -23,6 +23,14 @@ SNAPSHOT_SCHEMA = [
     bigquery.SchemaField("email_blocklisted", "BOOL"),
 ]
 
+TEMPLATE_STATUS_SCHEMA = [
+    bigquery.SchemaField("template_id", "INTEGER"),
+    bigquery.SchemaField("name", "STRING"),
+    bigquery.SchemaField("subject", "STRING"),
+    bigquery.SchemaField("is_active", "BOOL"),
+    bigquery.SchemaField("checked_at", "TIMESTAMP"),
+]
+
 
 def client():
     global _client
@@ -55,6 +63,21 @@ def load_snapshot(ndjson: bytes) -> int:
             schema=SNAPSHOT_SCHEMA))
     job.result()
     return int(scalar(f"SELECT COUNT(*) FROM `{C.T_SNAPSHOT}`"))
+
+
+def load_template_status(rows) -> int:
+    """Replace mkt_control.brevo_template_status with what Brevo says right now.
+
+    WRITE_TRUNCATE on purpose: a template that disappeared from Brevo must disappear here too,
+    or track_send_readiness would keep answering from a template that no longer exists.
+    """
+    job = client().load_table_from_json(
+        rows, C.T_TEMPLATE_STATUS,
+        job_config=bigquery.LoadJobConfig(
+            write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
+            schema=TEMPLATE_STATUS_SCHEMA))
+    job.result()
+    return len(rows)
 
 
 # --------------------------------------------------------------------------- #
@@ -98,6 +121,17 @@ def akcija_breakdown():
     """
     return [dict(r) for r in q(
         f"SELECT track, enabled, addresses, residual_now, residual_if_flipped FROM {C.V_IMPACT}")]
+
+
+def track_readiness():
+    """Per track x email_type for the current week: can this letter actually go out.
+
+    Read AFTER the template status refresh, so the verdict reflects Brevo as of this run and
+    not as of yesterday. The verdict logic lives in the view, shared with the sender.
+    """
+    return [dict(r) for r in q(
+        f"SELECT track, email_type, people, track_enabled, template_id, sendable, "
+        f"brevo_active, verdict FROM {C.V_READINESS} ORDER BY people DESC")]
 
 
 def write_report(rec):

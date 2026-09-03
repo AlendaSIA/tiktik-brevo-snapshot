@@ -1,8 +1,9 @@
 """Every statement this job runs, in one file, so the data contract is readable at a glance.
 
 The audience SQL is deliberately absent: it lives in the BigQuery views
-mkt_control.akcija_residual and mkt_control.akcija_audience_impact, which the pre-launch report
-reads too. One definition, one place.
+mkt_control.akcija_residual, mkt_control.akcija_audience_impact and
+mkt_control.track_send_readiness, which the pre-launch report and the sender read too.
+One definition, one place.
 """
 import io
 import logging
@@ -30,6 +31,11 @@ TEMPLATE_STATUS_SCHEMA = [
     bigquery.SchemaField("is_active", "BOOL"),
     bigquery.SchemaField("checked_at", "TIMESTAMP"),
 ]
+
+# The columns this job reads out of the readiness view. Listed, not SELECT *, so a view change
+# fails loudly here instead of quietly changing what the report means.
+READINESS_COLUMNS = ("track", "email_type", "people", "track_enabled", "template_id",
+                     "sendable", "brevo_active", "verdict_if_enabled", "verdict")
 
 
 def client():
@@ -129,9 +135,8 @@ def track_readiness():
     Read AFTER the template status refresh, so the verdict reflects Brevo as of this run and
     not as of yesterday. The verdict logic lives in the view, shared with the sender.
     """
-    return [dict(r) for r in q(
-        f"SELECT track, email_type, people, track_enabled, template_id, sendable, "
-        f"brevo_active, verdict FROM {C.V_READINESS} ORDER BY people DESC")]
+    cols = ", ".join(READINESS_COLUMNS)
+    return [dict(r) for r in q(f"SELECT {cols} FROM {C.V_READINESS} ORDER BY people DESC")]
 
 
 def write_report(rec):

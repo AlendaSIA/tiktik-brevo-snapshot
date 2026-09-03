@@ -6,7 +6,7 @@ config mistake away from an accident. A sender with no sending code cannot send.
 the credential so the sender does not have to.
 
 What it does, and nothing else:
-  1. exports Brevo contacts -> GCS -> business_marts.brevo_contacts_snapshot
+  1. exports Brevo contacts -> business_marts.brevo_contacts_snapshot (straight into BigQuery)
   2. syncs email_suppression_all -> Brevo list 4 (tiktik_suppression), ADD-ONLY
   3. writes the weekly akcija residual -> Brevo list 65 (tiktik_akcija_atlikums)
   4. filters every list it writes against email_suppression_all BEFORE writing
@@ -23,8 +23,6 @@ import logging
 import os
 import sys
 import uuid
-
-from google.cloud import storage
 
 import config as C
 import bq
@@ -51,10 +49,7 @@ def step1_snapshot(brevo):
                     "SUPPRESSION_FRESH guard will stop it once this goes stale")
         return None
     data = brevo.export_contacts_ndjson()
-    bucket, _, blob = C.SNAPSHOT_GCS_URI[len("gs://"):].partition("/")
-    storage.Client(project=C.PROJECT).bucket(bucket).blob(blob).upload_from_string(
-        data, content_type="application/x-ndjson")
-    n = bq.load_snapshot_from_gcs(C.SNAPSHOT_GCS_URI)
+    n = bq.load_snapshot(data)
     log.info("SNAPSHOT_REFRESHED contacts=%s", n)
     return n
 
@@ -98,8 +93,7 @@ def step3_akcija_residual(brevo, report):
              C.AKCIJA_LIST_ID, len(target), len(current), len(to_add), len(to_remove))
     # PART H1.3 and H4: the orphan count is a TRACKED number, not a log line. The cutover
     # watches it shrink as the non-buyer path lands, and "the orphan count moving in the wrong
-    # direction" is a stop condition. Orphans stay in the report as a number that shrinks,
-    # never as people who quietly disappear from the mail.
+    # direction" is a stop condition.
     breakdown = bq.akcija_breakdown()
     report["akcija_orphans"] = sum(r["addresses"] for r in breakdown if r["track"] == "orphan")
     report["akcija_held_by_enabled"] = sum(r["addresses"] for r in breakdown if r["enabled"])

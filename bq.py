@@ -4,13 +4,24 @@ The audience SQL is deliberately absent: it lives in the BigQuery views
 mkt_control.akcija_residual and mkt_control.akcija_audience_impact, which the pre-launch report
 reads too. One definition, one place.
 """
+import io
 import logging
+
 from google.cloud import bigquery
 
 import config as C
 
 log = logging.getLogger("bq")
 _client = None
+
+SNAPSHOT_SCHEMA = [
+    bigquery.SchemaField("email", "STRING"),
+    bigquery.SchemaField("list_ids", "INTEGER", mode="REPEATED"),
+    bigquery.SchemaField("added_time", "DATE"),
+    bigquery.SchemaField("modified_time", "DATE"),
+    bigquery.SchemaField("email_subscribed", "BOOL"),
+    bigquery.SchemaField("email_blocklisted", "BOOL"),
+]
 
 
 def client():
@@ -30,20 +41,18 @@ def scalar(sql, params=None):
     return None if not rows else list(rows[0].values())[0]
 
 
-def load_snapshot_from_gcs(uri):
-    job = client().load_table_from_uri(
-        uri, C.T_SNAPSHOT,
+def load_snapshot(ndjson: bytes) -> int:
+    """Load the Brevo export straight from memory into BigQuery. No GCS staging.
+
+    Removed 2026-09-03 after the first dry run failed on storage.objects.create: the bucket hop
+    was a dependency and a permission this job never needed.
+    """
+    job = client().load_table_from_file(
+        io.BytesIO(ndjson), C.T_SNAPSHOT,
         job_config=bigquery.LoadJobConfig(
             source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
             write_disposition=bigquery.WriteDisposition.WRITE_TRUNCATE,
-            schema=[
-                bigquery.SchemaField("email", "STRING"),
-                bigquery.SchemaField("list_ids", "INTEGER", mode="REPEATED"),
-                bigquery.SchemaField("added_time", "DATE"),
-                bigquery.SchemaField("modified_time", "DATE"),
-                bigquery.SchemaField("email_subscribed", "BOOL"),
-                bigquery.SchemaField("email_blocklisted", "BOOL"),
-            ]))
+            schema=SNAPSHOT_SCHEMA))
     job.result()
     return int(scalar(f"SELECT COUNT(*) FROM `{C.T_SNAPSHOT}`"))
 

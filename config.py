@@ -10,10 +10,12 @@ BREVO_API_KEY = os.environ.get("BREVO_API_KEY", "")
 
 # The snapshot refresh is a READ from Brevo and a write to our own BigQuery, so it runs even in
 # a dry run: it is the thing the sender's SUPPRESSION_FRESH guard depends on.
+#
+# There is deliberately NO GCS staging. The first dry run (2026-09-03) failed because the runner
+# could not write to the bucket, and the honest reading of that error was that the hop was never
+# needed: the export goes from memory straight into BigQuery. One less dependency, one less
+# permission, and no "which bucket" question for the next person.
 REFRESH_SNAPSHOT = os.environ.get("REFRESH_SNAPSHOT", "true").lower() != "false"
-SNAPSHOT_GCS_URI = os.environ.get(
-    "SNAPSHOT_GCS_URI",
-    "gs://jaunais-za-aizv04022026-iso-tools/brevo/contacts_snapshot_latest.ndjson")
 
 # DRY_RUN governs ONLY the two Brevo list writes. Everything is computed and reported either way.
 DRY_RUN = os.environ.get("DRY_RUN", "true").lower() != "false"

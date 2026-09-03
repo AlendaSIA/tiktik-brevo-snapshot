@@ -60,8 +60,12 @@ def step2_suppression_list(brevo, report):
     current = bq.list_members(C.SUPPRESSION_LIST_ID)
     to_add = sorted(target - current)
     would_remove = sorted(current - target)
+    # would_* is what the run DECIDED, in both modes. added/removed is what it EXECUTED.
+    # Keeping only the second (until 2026-09-03) made a dry run report three zeros that read
+    # as "nothing to do" when they meant "did nothing" - see FINDING G in the pavediens.
     report.update(suppression_target=len(target), suppression_current=len(current),
-                  suppression_added=0, suppression_would_remove=len(would_remove))
+                  suppression_would_add=len(to_add), suppression_would_remove=len(would_remove),
+                  suppression_added=0)
     log.info("SUPPRESSION list=%s target=%s current=%s +%s (would_remove=%s, never executed)",
              C.SUPPRESSION_LIST_ID, len(target), len(current), len(to_add), len(would_remove))
     if would_remove:
@@ -88,6 +92,7 @@ def step3_akcija_residual(brevo, report):
     to_add = sorted(target - current)
     to_remove = sorted(current - target)
     report.update(akcija_target=len(target), akcija_current=len(current),
+                  akcija_would_add=len(to_add), akcija_would_remove=len(to_remove),
                   akcija_added=0, akcija_removed=0)
     log.info("AKCIJA list=%s target=%s current=%s +%s -%s",
              C.AKCIJA_LIST_ID, len(target), len(current), len(to_add), len(to_remove))

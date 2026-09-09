@@ -65,12 +65,28 @@ GROWTH_FRAC  = float(os.environ.get("GROWTH_FRAC", "0.005"))
 SHRINK_MIN   = int(os.environ.get("SHRINK_MIN", "5"))
 SHRINK_FRAC  = float(os.environ.get("SHRINK_FRAC", "0.03"))
 
-# "batch 1 %" was given as a third parameter and is deliberately NOT implemented. Two readings
-# fit the words - a write batch size, or a per-run cap on how much of a list may change - and
-# they behave differently in the case that matters (a first materialisation, where a cap would
-# block the fill entirely). A guard whose meaning nobody can state is the same defect as an
-# alarm that is always on: it looks like safety and carries none. Asked in _INBOX.md 09.09;
-# it will be implemented when it means something. Until then this value is inert on purpose.
+# "batch 1 %" was WITHDRAWN by Marketing on 2026-09-09, and the reason is worth keeping.
+#
+# It arrived in the 08.09 plan inside a list of three numbers - growth max(10; 0,5 %), shrink
+# max(5; 3 %), batch 1 % - and was carried into the work order without anyone ever establishing
+# what it meant. Asked directly, Marketing found it could not be stated, and removed it from the
+# plan rather than leave it as an unmet requirement. Neither candidate reading survived: a write
+# batch size is a performance detail that must not carry a safety-sounding name, and a 1 % cap on
+# change per run is 80 people on a list of 8 000 - ordinary weekly churn would exceed it every
+# run, and a guard that fires every run is switched off within a fortnight.
+#
+# What belongs here eventually is a RUNAWAY guard: a change so large it means the audience
+# DEFINITION broke rather than that customers moved - a list losing most of its members or
+# doubling in one run. That is a refusal, not a delay, and it must be inapplicable to a first
+# fill, exactly like the growth-floor exemption for an empty list.
+#
+# Its threshold is NOT to be taken from a document. It gets measured from real weekly churn per
+# variant, once more than one week of plans exists, and set well above the largest honest
+# movement observed. A threshold derived from measurement can be defended; one derived from a
+# document is how 1 % got here in the first place.
+#
+# Until that measurement exists this value stays inert and honestly named, so nobody can read it
+# as a guard that is working.
 BATCH_FRAC_UNIMPLEMENTED = float(os.environ.get("BATCH_FRAC", "0.01"))
 
 T_VARIANT_REPORT = f"{PROJECT}.{CONTROL}.variant_list_run_report"

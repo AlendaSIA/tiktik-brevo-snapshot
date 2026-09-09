@@ -12,6 +12,7 @@ What it does, and nothing else:
   4. syncs email_suppression_all -> Brevo list 4 (tiktik_suppression), ADD-ONLY
   5. writes the weekly akcija residual -> Brevo list 65 (tiktik_akcija_atlikums)
   6. filters every list it writes against email_suppression_all BEFORE writing
+  7. materialises one Brevo list per variant from mkt_control.variant_list_plan (Phase 3)
 
 What it cannot do: send. See brevo_client.py - the client exposes four operations and the
 surface is asserted at import time.
@@ -28,6 +29,7 @@ import uuid
 
 import config as C
 import bq
+import variant_lists
 from brevo_client import BrevoContactsClient
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
@@ -169,6 +171,157 @@ def step5_akcija_residual(brevo, report):
         report["akcija_removed"] = brevo.list_remove(C.AKCIJA_LIST_ID, to_remove)
 
 
+def step6_variant_lists(brevo, report):
+    """One Brevo list per variant, materialised from the plan. Phase 3, this node's half.
+
+    The plan is READ from mkt_control.variant_list_plan and never recomputed here - it is the
+    sender's builder's answer to "who is in this variant", and a second answer is the defect
+    class this system removed twice this month.
+
+    The four checks below are the guarantees asked for in _INBOX on 09.09, and they are asserted
+    for the WHOLE send_date rather than per list. A plan failing one of them is broken AS A PLAN;
+    materialising the lists that happen to pass would leave a half-applied audience nobody can
+    reason about, which is harder to recover from than writing nothing.
+
+    This step reports into its OWN table. `report` is loaded into snapshot_run_report, which has
+    a fixed 25-column schema, and appending fields to it from a JSON load would fail the whole
+    run-report writer - a new step must not be able to break the reporting of the five that came
+    before it. Widening that table is a deliberate schema change, not a side effect of this one.
+    """
+    vrep = {"run_id": RUN_ID, "started_at": _now().isoformat(), "dry_run": C.DRY_RUN,
+            "status": "running", "send_dates": None, "lists": 0, "would_add": 0,
+            "would_remove": 0, "forced_remove": 0, "held_add": 0, "held_remove": 0,
+            "lists_written": 0, "suppressed_in_plan": 0, "unnormalised_in_plan": 0,
+            "detail_json": None, "error": None}
+    try:
+        if not C.VARIANT_LISTS:
+            vrep["status"] = "disabled"
+            log.info("VARIANT_LISTS disabled")
+            return
+        dates = bq.variant_plan_send_dates()
+        if not dates:
+            # Expected until the sender's builder writes a plan. Deliberately quiet: an alarm
+            # that fires every night about a known-absent dependency trains everyone to ignore
+            # it, and then it fires for a real reason.
+            vrep["status"] = "skipped_no_plan"
+            log.info("VARIANT_NO_PLAN - no planned rows, nothing to materialise")
+            return
+        vrep["send_dates"] = ", ".join(str(d) for d in dates)
+
+        owned = bq.owned_list_ids()
+        sup = bq.suppressed()
+        per_list = []
+
+        for d in dates:
+            rows = bq.variant_plan(d)
+            snaps = {r["snapshot_id"] for r in rows}
+            if len(snaps) > 1:
+                raise Hold(f"VARIANT_PLAN_MID_WRITE send_date={d} snapshots={sorted(snaps)} - "
+                           f"the plan is being rewritten. Read now and a partial audience reads "
+                           f"as a real shrink, which is what the shrink floor exists to catch.")
+            if any(r["brevo_list_id"] is None for r in rows):
+                raise Hold(f"VARIANT_PLAN_NULL_LIST send_date={d} - a planned row with no list.")
+            unowned = sorted({int(r["brevo_list_id"]) for r in rows} - owned)
+            if unowned:
+                raise Hold(f"VARIANT_PLAN_UNOWNED_LIST send_date={d} lists={unowned} - not in "
+                           f"mkt_control.list_plan. Creating the list would invent an audience "
+                           f"and writing to someone else's would be worse.")
+            seen, dup = set(), 0
+            for r in rows:
+                k = (r["brevo_list_id"], r["master_key"])
+                dup += k in seen
+                seen.add(k)
+            if dup:
+                raise Hold(f"VARIANT_PLAN_GRAIN send_date={d} duplicate_rows={dup} - the plan "
+                           f"must hold one row per (send_date, brevo_list_id, master_key). Two "
+                           f"rows for one person make a duplicate indistinguishable from a real "
+                           f"second membership, and the floors then divide by a wrong "
+                           f"denominator.")
+
+            unnormalised = sum(1 for r in rows if r["email_raw"] != r["email"])
+            vrep["unnormalised_in_plan"] += unnormalised
+            if unnormalised:
+                log.warning("VARIANT_PLAN_UNNORMALISED n=%s - addresses not lowercased/trimmed. "
+                            "Normalised here, but our counts and the planner's will disagree "
+                            "until it is fixed at the source.", unnormalised)
+
+            leaked = sorted({r["email"] for r in rows} & sup)
+            vrep["suppressed_in_plan"] += len(leaked)
+            if leaked:
+                # Dropped, never sent - but said out loud. Silently compensating for a missing
+                # filter upstream is how the filter stays missing.
+                log.error("PLAN_CONTAINED_SUPPRESSED send_date=%s n=%s - opted-out addresses in "
+                          "the membership plan. Dropped here; fix it where the plan is built.",
+                          d, len(leaked))
+
+            by_list = {}
+            for r in rows:
+                if r["email"] in sup:
+                    continue
+                by_list.setdefault(int(r["brevo_list_id"]), set()).add(r["email"])
+            all_planned = set().union(*by_list.values()) if by_list else set()
+
+            for lid, target in sorted(by_list.items()):
+                current = bq.list_members(lid)
+                ch = variant_lists.plan_list_change(
+                    current, target, sup, all_planned - target,
+                    C.GROWTH_MIN, C.GROWTH_FRAC, C.SHRINK_MIN, C.SHRINK_FRAC)
+                log.info("VARIANT list=%s send_date=%s target=%s current=%s +%s -%s "
+                         "(forced=%s held_add=%s held_remove=%s floors=%s/%s first_fill=%s)",
+                         lid, d, ch["target"], ch["current"], len(ch["to_add"]),
+                         len(ch["to_remove"]), len(ch["forced_remove"]), len(ch["held_add"]),
+                         len(ch["held_remove"]), ch["growth_floor"], ch["shrink_floor"],
+                         ch["first_fill"])
+                per_list.append({"send_date": str(d), "brevo_list_id": lid,
+                                 "snapshot_id": sorted(snaps)[0] if snaps else None,
+                                 "target": ch["target"], "current": ch["current"],
+                                 "would_add": len(ch["to_add"]),
+                                 "would_remove": len(ch["to_remove"]),
+                                 "forced_remove": len(ch["forced_remove"]),
+                                 "held_add": len(ch["held_add"]),
+                                 "held_remove": len(ch["held_remove"]),
+                                 "first_fill": ch["first_fill"]})
+                vrep["would_add"] += len(ch["to_add"])
+                vrep["would_remove"] += len(ch["to_remove"])
+                vrep["forced_remove"] += len(ch["forced_remove"])
+                vrep["held_add"] += len(ch["held_add"])
+                vrep["held_remove"] += len(ch["held_remove"])
+                if C.DRY_RUN:
+                    continue
+                if ch["to_add"]:
+                    brevo.list_add(lid, ch["to_add"])
+                if ch["to_remove"]:
+                    brevo.list_remove(lid, ch["to_remove"])
+                if ch["to_add"] or ch["to_remove"]:
+                    vrep["lists_written"] += 1
+
+        vrep["lists"] = len(per_list)
+        vrep["detail_json"] = json.dumps(per_list, ensure_ascii=False)
+        if per_list and vrep["would_add"] == 0 and vrep["would_remove"] == 0:
+            # Rows were planned and not one list moved. Distinct from "no plan" on purpose: this
+            # is the state nobody would otherwise notice, and the one worth waking someone for.
+            vrep["status"] = "wrote_nothing"
+            log.error("VARIANT_WROTE_NOTHING lists=%s - a plan exists and no list changed. "
+                      "Either every list is already exact, or every change sat under a floor.",
+                      len(per_list))
+        else:
+            vrep["status"] = "ok"
+    except Hold as e:
+        vrep["status"] = "hold"
+        vrep["error"] = str(e)[:1000]
+        raise
+    except Exception as e:                                        # noqa: BLE001
+        vrep["status"] = "error"
+        vrep["error"] = repr(e)[:1000]
+        raise
+    finally:
+        vrep["finished_at"] = _now().isoformat()
+        try:
+            bq.write_variant_report(vrep)
+        except Exception:                                         # noqa: BLE001
+            log.exception("variant run report write failed")
+
+
 def main():
     report = {"run_id": RUN_ID, "started_at": _now().isoformat(), "dry_run": C.DRY_RUN}
     try:
@@ -178,6 +331,7 @@ def main():
         step3_readiness(report)
         step4_suppression_list(brevo, report)
         step5_akcija_residual(brevo, report)
+        step6_variant_lists(brevo, report)
         report.update(status="ok", finished_at=_now().isoformat())
         bq.write_report(report)
         log.info("RUN_OK %s", report)

@@ -141,3 +141,37 @@ def track_readiness():
 
 def write_report(rec):
     client().load_table_from_json([rec], C.T_REPORT).result()
+
+
+# --------------------------------------------------------------------------- #
+# Phase 3: the variant membership plan. READ ONLY. Every function here selects
+# from mkt_control.variant_list_plan; none of them recomputes who belongs where.
+# --------------------------------------------------------------------------- #
+def variant_plan_send_dates():
+    """Distinct send_date values currently carrying planned rows."""
+    return [r["send_date"] for r in q(
+        f"SELECT DISTINCT send_date FROM {C.V_VARIANT_PLAN} ORDER BY send_date")]
+
+
+def variant_plan(send_date):
+    """The planned rows for one send_date: list, person, address, and the snapshot they came from."""
+    return [dict(r) for r in q(
+        f"SELECT brevo_list_id, master_key, LOWER(TRIM(email)) AS email, email AS email_raw, "
+        f"       email_type, track, template_id, snapshot_id "
+        f"FROM {C.V_VARIANT_PLAN} WHERE send_date = @d",
+        [bigquery.ScalarQueryParameter("d", "DATE", send_date)])]
+
+
+def owned_list_ids():
+    """Brevo list ids this system is allowed to write, from the control table.
+
+    A plan row pointing at a list we do not own is the one case that cannot be made safe by
+    filtering: creating the list would invent an audience, and writing to someone else's list
+    would be worse. It is refused.
+    """
+    return {int(r["brevo_list_id"]) for r in q(
+        f"SELECT DISTINCT brevo_list_id FROM {C.T_LIST_PLAN} WHERE brevo_list_id IS NOT NULL")}
+
+
+def write_variant_report(rec):
+    client().load_table_from_json([rec], C.T_VARIANT_REPORT).result()

@@ -46,3 +46,39 @@ T_TEMPLATE_STATUS = f"{PROJECT}.{CONTROL}.brevo_template_status"
 V_RESIDUAL    = f"`{PROJECT}.{CONTROL}.akcija_residual`"
 V_IMPACT      = f"`{PROJECT}.{CONTROL}.akcija_audience_impact`"
 V_READINESS   = f"`{PROJECT}.{CONTROL}.track_send_readiness`"
+
+# --- Phase 3: one Brevo list per variant -----------------------------------------
+# The membership plan is READ, never recomputed. mkt_control.variant_list_plan is a view over
+# campaign_audience_snapshot WHERE dispatch_state='planned', owned by the sender's builder.
+# Recomputing it here would make two answers to "who is in this variant", which is the defect
+# class this system removed on 04.09 (two template mappings) and again on 09.09 (a second
+# pricing path). One answer, read from where it is decided.
+VARIANT_LISTS   = os.environ.get("VARIANT_LISTS", "true").lower() != "false"
+V_VARIANT_PLAN  = f"`{PROJECT}.{CONTROL}.variant_list_plan`"
+T_LIST_PLAN     = f"`{PROJECT}.{CONTROL}.list_plan`"
+
+# Asymmetric drift floors. A FLOOR is the smallest drift worth acting on: below it the list is
+# left alone rather than churned for noise. Shrinking needs a louder signal than growing,
+# because a wrong audience shows up as a mass removal.
+GROWTH_MIN   = int(os.environ.get("GROWTH_MIN", "10"))
+GROWTH_FRAC  = float(os.environ.get("GROWTH_FRAC", "0.005"))
+SHRINK_MIN   = int(os.environ.get("SHRINK_MIN", "5"))
+SHRINK_FRAC  = float(os.environ.get("SHRINK_FRAC", "0.03"))
+
+# "batch 1 %" was given as a third parameter and is deliberately NOT implemented. Two readings
+# fit the words - a write batch size, or a per-run cap on how much of a list may change - and
+# they behave differently in the case that matters (a first materialisation, where a cap would
+# block the fill entirely). A guard whose meaning nobody can state is the same defect as an
+# alarm that is always on: it looks like safety and carries none. Asked in _INBOX.md 09.09;
+# it will be implemented when it means something. Until then this value is inert on purpose.
+BATCH_FRAC_UNIMPLEMENTED = float(os.environ.get("BATCH_FRAC", "0.01"))
+
+T_VARIANT_REPORT = f"{PROJECT}.{CONTROL}.variant_list_run_report"
+
+# The global DRY_RUN is FALSE in production - this job writes to Brevo lists for real every
+# night. A new step that writes would therefore go live the moment it deploys, with its first
+# real plan as its first real run. VARIANT_DRY_RUN is a separate switch, defaulting to true, so
+# the first plan can be read as would_add / would_remove numbers in
+# mkt_control.variant_list_run_report before a single address moves. Turning it off is a
+# decision somebody makes after reading a run, not a side effect of a merge.
+VARIANT_DRY_RUN = os.environ.get("VARIANT_DRY_RUN", "true").lower() != "false"

@@ -188,7 +188,8 @@ def step6_variant_lists(brevo, report):
     run-report writer - a new step must not be able to break the reporting of the five that came
     before it. Widening that table is a deliberate schema change, not a side effect of this one.
     """
-    vrep = {"run_id": RUN_ID, "started_at": _now().isoformat(), "dry_run": C.DRY_RUN,
+    writes_held = C.DRY_RUN or C.VARIANT_DRY_RUN
+    vrep = {"run_id": RUN_ID, "started_at": _now().isoformat(), "dry_run": writes_held,
             "status": "running", "send_dates": None, "lists": 0, "would_add": 0,
             "would_remove": 0, "forced_remove": 0, "held_add": 0, "held_remove": 0,
             "lists_written": 0, "suppressed_in_plan": 0, "unnormalised_in_plan": 0,
@@ -286,7 +287,8 @@ def step6_variant_lists(brevo, report):
                 vrep["forced_remove"] += len(ch["forced_remove"])
                 vrep["held_add"] += len(ch["held_add"])
                 vrep["held_remove"] += len(ch["held_remove"])
-                if C.DRY_RUN:
+                if writes_held:
+                    # Computed and reported, not written. See VARIANT_DRY_RUN in config.py.
                     continue
                 if ch["to_add"]:
                     brevo.list_add(lid, ch["to_add"])

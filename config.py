@@ -74,3 +74,11 @@ SHRINK_FRAC  = float(os.environ.get("SHRINK_FRAC", "0.03"))
 BATCH_FRAC_UNIMPLEMENTED = float(os.environ.get("BATCH_FRAC", "0.01"))
 
 T_VARIANT_REPORT = f"{PROJECT}.{CONTROL}.variant_list_run_report"
+
+# The global DRY_RUN is FALSE in production - this job writes to Brevo lists for real every
+# night. A new step that writes would therefore go live the moment it deploys, with its first
+# real plan as its first real run. VARIANT_DRY_RUN is a separate switch, defaulting to true, so
+# the first plan can be read as would_add / would_remove numbers in
+# mkt_control.variant_list_run_report before a single address moves. Turning it off is a
+# decision somebody makes after reading a run, not a side effect of a merge.
+VARIANT_DRY_RUN = os.environ.get("VARIANT_DRY_RUN", "true").lower() != "false"
